@@ -1,11 +1,16 @@
 import subprocess
 import time
-import threading
+from fallback_reviewer import fallback_review
 
 
-def run_ollama_model(model: str, prompt: str, timeout: int = 30):
-    """Run a specific Ollama model with timeout"""
+def run_ollama_model(model: str, prompt: str, timeout: int = 180):
+    """Run Ollama model with very large timeout"""
     try:
+        print(f"[DEBUG] Running {model} with {timeout}s timeout...")
+        print(f"[DEBUG] This might take up to {timeout // 60} minutes...")
+
+        start_model_time = time.time()
+
         result = subprocess.run(
             ["ollama", "run", model],
             input=prompt,
@@ -13,81 +18,66 @@ def run_ollama_model(model: str, prompt: str, timeout: int = 30):
             text=True,
             timeout=timeout
         )
+
+        model_time = time.time() - start_model_time
+        print(f"[DEBUG] {model} completed in {model_time:.2f}s")
+
         return result
     except subprocess.TimeoutExpired:
+        print(f"[DEBUG] {model} timed out after {timeout}s")
         return None
     except Exception as e:
-        print(f"[ERROR] Model {model} failed: {e}")
+        print(f"[DEBUG] {model} error: {e}")
         return None
 
 
 def run_phi3(code: str, language: str = None):
     """
-    Optimized version that tries multiple models with smart timeouts
+    Try AI models with VERY large timeouts
     """
-    # Simple, clear prompt for faster response
-    prompt = f"""Please provide a brief code review (2-3 sentences) for this {language} code:
+    start_time = time.time()
 
-{code}
+    clean_code = code.strip()
+
+    # Simple, clear prompt
+    prompt = f"""Review this {language} code and provide feedback:
+
+{clean_code}
 
 Review:"""
 
-    start_time = time.time()
-
-    # Try models in order of expected speed
+    # Very large timeouts - up to 5 minutes per model
     models_to_try = [
-        ("phi:latest", 15),  # Fastest model, short timeout
-        ("phi3:mini", 25),  # Medium speed
-        ("codellama:7b", 30)  # Slower but more capable
+        ("phi:latest", 120),  # 2 minutes
+        ("phi3:mini", 180),  # 3 minutes
+        ("codellama:7b", 300),  # 5 minutes
     ]
 
     for model_name, timeout in models_to_try:
-        print(f"[INFO] Trying model: {model_name} with {timeout}s timeout")
-
+        print(f"[INFO] Trying {model_name} with {timeout}s timeout ({timeout // 60} min)")
         result = run_ollama_model(model_name, prompt, timeout)
 
-        if result and result.returncode == 0 and result.stdout.strip():
-            elapsed = time.time() - start_time
-            print(f"[SUCCESS] Got response from {model_name} in {elapsed:.2f}s")
+        if result and result.returncode == 0:
+            response = result.stdout.strip()
+            if response:
+                elapsed = time.time() - start_time
+                print(f"[SUCCESS] Got response from {model_name} in {elapsed:.2f}s")
 
-            return {
-                "review": result.stdout.strip(),
-                "refactoring_suggestions": [],
-                "comments": [],
-                "partial_review": False,
-                "estimated_time": elapsed,
-                "language": language,
-                "model_used": model_name
-            }
-        elif result and result.stderr:
-            print(f"[WARNING] Model {model_name} error: {result.stderr[:200]}...")
+                return {
+                    "review": response,
+                    "refactoring_suggestions": [],
+                    "comments": [],
+                    "partial_review": False,
+                    "estimated_time": elapsed,
+                    "language": language,
+                    "model_used": model_name,
+                    "ai_generated": True
+                }
 
-    # If all models fail or timeout
-    elapsed = time.time() - start_time
-    print(f"[ERROR] All models failed or timed out")
+    # Fallback
+    print("[INFO] Using fallback after all timeouts")
+    result = fallback_review(code, language)
+    result["estimated_time"] = time.time() - start_time
+    result["ai_generated"] = False
 
-    # Provide a basic fallback review
-    fallback_review = f"""Basic code review for {language}:
-
-This appears to be a calculator program that takes two numbers and an operation. 
-The code uses global variables which might be better as local variables. 
-Consider adding input validation and error handling for operations like division by zero."""
-
-    return {
-        "review": fallback_review,
-        "refactoring_suggestions": [
-            "Use local variables instead of global variables",
-            "Add input validation",
-            "Handle division by zero and other edge cases",
-            "Improve variable names for better readability"
-        ],
-        "comments": [
-            "Global variables a, b, c could be local to main()",
-            "Consider using a switch statement for operations",
-            "Add error handling for invalid inputs"
-        ],
-        "partial_review": True,
-        "estimated_time": elapsed,
-        "language": language,
-        "fallback_used": True
-    }
+    return result
